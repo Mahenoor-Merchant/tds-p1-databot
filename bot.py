@@ -411,9 +411,21 @@ def send_message(chat_id: int, text: str):
 
 
 # ------------------------------------------------------------------ webhook endpoint
+def _handle_message(chat_id: int, user_text: str):
+    """Process a message in the background."""
+    try:
+        reply = agent_loop(chat_id, user_text)
+    except Exception as e:
+        tb = traceback.format_exc(limit=3)
+        log_event(event="handler_crash", chat_id=chat_id, error=str(e), traceback=tb)
+        reply = json.dumps({"answer": "internal error", "log_url": LOG_URL})
+    send_message(chat_id, reply)
+    print(f"[BOT] Replied to {chat_id}: {reply[:200]}", flush=True)
+
+
 @app.post("/webhook")
 async def webhook(request_data: dict):
-    """Receive Telegram updates via webhook (replaces polling)."""
+    """Receive Telegram updates via webhook."""
     msg = request_data.get("message")
     if not msg or "text" not in msg:
         return {"ok": True}
@@ -422,18 +434,8 @@ async def webhook(request_data: dict):
     user_text = msg["text"]
     print(f"[BOT] Message from {chat_id}: {user_text[:100]}...", flush=True)
 
-    try:
-        reply = agent_loop(chat_id, user_text)
-    except Exception as e:
-        tb = traceback.format_exc(limit=3)
-        log_event(event="handler_crash", chat_id=chat_id, error=str(e), traceback=tb)
-        reply = json.dumps({
-            "answer": "internal error",
-            "log_url": LOG_URL,
-        })
-
-    send_message(chat_id, reply)
-    print(f"[BOT] Replied to {chat_id}: {reply[:200]}", flush=True)
+    # Process in background so Telegram gets instant 200 OK
+    threading.Thread(target=_handle_message, args=(chat_id, user_text), daemon=True).start()
     return {"ok": True}
 
 
