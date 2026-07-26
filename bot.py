@@ -410,71 +410,37 @@ def send_message(chat_id: int, text: str):
     return tg_request("sendMessage", chat_id=chat_id, text=text)
 
 
-def telegram_poll_loop():
-    """Long-poll Telegram for updates and handle each message."""
-    offset = 0
-    print(f"[BOT] Starting Telegram polling loop... (model={MODEL})")
+# ------------------------------------------------------------------ webhook endpoint
+@app.post("/webhook")
+async def webhook(request_data: dict):
+    """Receive Telegram updates via webhook (replaces polling)."""
+    msg = request_data.get("message")
+    if not msg or "text" not in msg:
+        return {"ok": True}
 
-    while True:
-        try:
-            resp = requests.get(
-                f"{TG_API}/getUpdates",
-                params={"offset": offset, "timeout": 30},
-                timeout=60,
-            )
-            data = resp.json()
+    chat_id = msg["chat"]["id"]
+    user_text = msg["text"]
+    print(f"[BOT] Message from {chat_id}: {user_text[:100]}...", flush=True)
 
-            if not data.get("ok"):
-                print(f"[BOT] getUpdates error: {data}")
-                time.sleep(5)
-                continue
+    try:
+        reply = agent_loop(chat_id, user_text)
+    except Exception as e:
+        tb = traceback.format_exc(limit=3)
+        log_event(event="handler_crash", chat_id=chat_id, error=str(e), traceback=tb)
+        reply = json.dumps({
+            "answer": "internal error",
+            "log_url": LOG_URL,
+        })
 
-            for update in data.get("result", []):
-                offset = update["update_id"] + 1
-                msg = update.get("message")
-                if not msg or "text" not in msg:
-                    continue
-
-                chat_id = msg["chat"]["id"]
-                user_text = msg["text"]
-                print(f"[BOT] Message from {chat_id}: {user_text[:100]}...")
-
-                try:
-                    reply = agent_loop(chat_id, user_text)
-                except Exception as e:
-                    tb = traceback.format_exc(limit=3)
-                    log_event(event="handler_crash", chat_id=chat_id, error=str(e), traceback=tb)
-                    reply = json.dumps({
-                        "answer": "internal error",
-                        "log_url": LOG_URL,
-                    })
-
-                send_message(chat_id, reply)
-                print(f"[BOT] Replied to {chat_id}: {reply[:200]}")
-
-        except requests.exceptions.Timeout:
-            continue  # Normal for long polling
-        except Exception as e:
-            print(f"[BOT] Poll loop error: {e}")
-            time.sleep(5)
-
-
-# ------------------------------------------------------------------ keep-warm
-def keep_warm_loop():
-    """Ping our own /health endpoint to prevent the free host from sleeping."""
-    while True:
-        time.sleep(KEEP_WARM_INTERVAL)
-        try:
-            requests.get(f"{BASE_URL}/health", timeout=10)
-            print("[PING] Keep-warm ping OK")
-        except Exception as e:
-            print(f"[PING] Keep-warm ping failed: {e}")
+    send_message(chat_id, reply)
+    print(f"[BOT] Replied to {chat_id}: {reply[:200]}", flush=True)
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ startup
 @app.on_event("startup")
 def on_startup():
-    """Start background threads when the FastAPI app boots."""
+    """Register Telegram webhook on boot."""
     # Ensure log file exists
     os.makedirs(os.path.dirname(LOG_PATH) if os.path.dirname(LOG_PATH) else ".", exist_ok=True)
     if not os.path.exists(LOG_PATH):
@@ -483,14 +449,9 @@ def on_startup():
 
     log_event(event="startup", model=MODEL, base_url=BASE_URL)
 
-    # Start Telegram polling thread
-    poll_thread = threading.Thread(target=telegram_poll_loop, daemon=True)
-    poll_thread.start()
-    print("[STARTUP] Telegram poll thread started")
+    # Register webhook with Telegram
+    webhook_url = f"{BASE_URL}/webhook"
+    result = tg_request("setWebhook", url=webhook_url)
+    print(f"[STARTUP] setWebhook({webhook_url}) -> {result}", flush=True)
 
-    # Start keep-warm thread
-    warm_thread = threading.Thread(target=keep_warm_loop, daemon=True)
-    warm_thread.start()
-    print("[STARTUP] Keep-warm thread started")
-
-    print(f"[STARTUP] Bot is live! LOG_URL={LOG_URL}")
+    print(f"[STARTUP] Bot is live! LOG_URL={LOG_URL}", flush=True)
