@@ -29,8 +29,11 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 # ------------------------------------------------------------------ config
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL = os.environ.get("MODEL", "gpt-4o")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 MODEL_BASE_URL = os.environ.get("MODEL_BASE_URL", "https://aipipe.org/openai/v1")
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
 LOG_PATH = os.environ.get("LOG_PATH", "/tmp/run.jsonl")
 LOG_URL = f"{BASE_URL}/run.jsonl"
@@ -239,7 +242,8 @@ def finalize_response(raw_text: str) -> str:
 
 # ------------------------------------------------------------------ LLM calls
 def chat_completion(messages: list[dict], tools=None) -> dict:
-    """Call the OpenAI-compatible chat completion endpoint."""
+    """Call the OpenAI-compatible chat completion endpoint.
+    Falls back to Gemini if the primary (aipipe) call fails."""
     headers = {
         "Authorization": f"Bearer {AIPIPE_TOKEN}",
         "Content-Type": "application/json",
@@ -252,14 +256,39 @@ def chat_completion(messages: list[dict], tools=None) -> dict:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
-    resp = requests.post(
-        f"{MODEL_BASE_URL}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = requests.post(
+            f"{MODEL_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as primary_err:
+        if not GEMINI_API_KEY:
+            raise  # no fallback configured, re-raise original error
+        log_event(event="aipipe_fallback", error=str(primary_err))
+        # Retry with Gemini
+        gemini_headers = {
+            "Authorization": f"Bearer {GEMINI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        gemini_payload = {
+            "model": GEMINI_MODEL,
+            "messages": messages,
+        }
+        if tools:
+            gemini_payload["tools"] = tools
+            gemini_payload["tool_choice"] = "auto"
+        resp = requests.post(
+            f"{GEMINI_BASE_URL}/chat/completions",
+            headers=gemini_headers,
+            json=gemini_payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 # ------------------------------------------------------------------ agent loop

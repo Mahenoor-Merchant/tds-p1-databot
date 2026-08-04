@@ -11,5 +11,7 @@ services:
         sync: false
       - key: MODEL
         value: gpt-4o
+      - key: GEMINI_API_KEY
+        sync: false
       - key: BASE_URL
         sync: false
