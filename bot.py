@@ -269,7 +269,7 @@ def chat_completion(messages: list[dict], tools=None) -> dict:
         if not GEMINI_API_KEY:
             raise  # no fallback configured, re-raise original error
         log_event(event="aipipe_fallback", error=str(primary_err))
-        # Retry with Gemini
+        # Retry with Gemini (with retries for rate limits)
         gemini_headers = {
             "Authorization": f"Bearer {GEMINI_API_KEY}",
             "Content-Type": "application/json",
@@ -281,14 +281,20 @@ def chat_completion(messages: list[dict], tools=None) -> dict:
         if tools:
             gemini_payload["tools"] = tools
             gemini_payload["tool_choice"] = "auto"
-        resp = requests.post(
-            f"{GEMINI_BASE_URL}/chat/completions",
-            headers=gemini_headers,
-            json=gemini_payload,
-            timeout=120,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        for attempt in range(3):
+            resp = requests.post(
+                f"{GEMINI_BASE_URL}/chat/completions",
+                headers=gemini_headers,
+                json=gemini_payload,
+                timeout=120,
+            )
+            if resp.status_code == 429 and attempt < 2:
+                wait = (attempt + 1) * 5  # 5s, 10s
+                log_event(event="gemini_rate_limit", attempt=attempt, wait=wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
 
 
 # ------------------------------------------------------------------ agent loop
